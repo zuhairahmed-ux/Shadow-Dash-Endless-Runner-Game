@@ -290,7 +290,7 @@ class Obstacle(object):
         "spike": {"size": (44, 44), "y": settings.GROUND_Y - 44},
         "rock": {"size": (56, 48), "y": settings.GROUND_Y - 48},
         "wall": {"size": (40, 92), "y": settings.GROUND_Y - 92},
-        "drone": {"size": (58, 34), "y": settings.GROUND_Y - 132},
+        "drone": {"size": (58, 34), "y": settings.GROUND_Y - 92},
     }
 
     def __init__(self, kind, x):
@@ -369,6 +369,64 @@ class Coin(object):
             surface, settings.SOFT_WHITE,
             pygame.Rect(cx - width, cy - self.radius, width * 2, self.radius * 2), 2
         )
+
+
+class PowerUp(object):
+    """Collectible ability item: shield, magnet, or slow motion."""
+
+    COLORS = {
+        "shield": settings.NEON_CYAN,
+        "magnet": settings.NEON_MAGENTA,
+        "slowmo": settings.NEON_LIME,
+    }
+
+    LABELS = {
+        "shield": "S",
+        "magnet": "M",
+        "slowmo": "T",
+    }
+
+    def __init__(self, kind, x, y):
+        self.kind = kind
+        self.x = float(x)
+        self.y = float(y)
+        self.size = 30
+        self.rect = pygame.Rect(int(x), int(y), self.size, self.size)
+        self.animation = random.random() * math.pi * 2.0
+
+    def update(self, dt, speed):
+        self.x -= speed * dt
+        self.animation += dt * 5.5
+        bob = math.sin(self.animation) * 4.0
+        self.rect.x = int(self.x)
+        self.rect.y = int(self.y + bob)
+
+    def is_offscreen(self):
+        return self.x + self.size < -50
+
+    def draw(self, surface, offset):
+        rect = self.rect.move(offset)
+        color = self.COLORS[self.kind]
+        glow_rect = rect.inflate(14, 14)
+        glow = pygame.Surface((glow_rect.width, glow_rect.height), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, (color[0], color[1], color[2], 46), glow.get_rect())
+        surface.blit(glow, glow_rect)
+
+        pygame.draw.rect(surface, settings.HUD_PANEL, rect, border_radius=7)
+        pygame.draw.rect(surface, color, rect, 3, border_radius=7)
+
+        cx, cy = rect.center
+        if self.kind == "shield":
+            points = [(cx, rect.y + 5), (rect.right - 6, cy), (cx, rect.bottom - 4), (rect.x + 6, cy)]
+            pygame.draw.polygon(surface, color, points, 2)
+        elif self.kind == "magnet":
+            pygame.draw.arc(surface, color, rect.inflate(-8, -8), 0.2, math.pi - 0.2, 4)
+            pygame.draw.line(surface, color, (rect.x + 8, cy), (rect.x + 8, rect.bottom - 7), 4)
+            pygame.draw.line(surface, color, (rect.right - 8, cy), (rect.right - 8, rect.bottom - 7), 4)
+        else:
+            pygame.draw.circle(surface, color, (cx, cy), 9, 2)
+            pygame.draw.line(surface, color, (cx, cy), (cx + 7, cy - 5), 3)
+            pygame.draw.line(surface, color, (cx, cy), (cx, cy + 7), 3)
 
 
 class BackgroundLayer(object):
