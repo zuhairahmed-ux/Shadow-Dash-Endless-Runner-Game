@@ -1,6 +1,7 @@
 """Main controller for Shadow Dash: Endless Escape."""
 
 import array
+import heapq
 import math
 import os
 import random
@@ -8,7 +9,7 @@ import random
 import pygame
 
 import settings
-from entities import BackgroundLayer, Coin, Obstacle, ParticleSystem, Player
+from entities import BackgroundLayer, Coin, Obstacle, ParticleSystem, Player, PowerUp
 
 
 STATE_MENU = "menu"
@@ -157,6 +158,7 @@ class Game(object):
         self.player = Player()
         self.obstacles = []
         self.coins = []
+        self.powerups = []
         self.particles = ParticleSystem()
         self.background_layers = self._create_background()
         self.sound = SoundManager(self.asset_dir)
@@ -171,9 +173,23 @@ class Game(object):
         self.speed_multiplier = 1.0
         self.combo = 1
         self.combo_timer = 0.0
+        self.best_combo = 1
+        self.max_speed_multiplier = 1.0
+        self.difficulty_label = "Easy"
+        self.difficulty_reached = "Easy"
+        self.ai_enabled = False
+        self.ai_slide_timer = 0.0
+        self.ai_jump_cooldown = 0.0
+        self.ai_cached_plan = []
+        self.ai_plan_timer = 0.0
+        self.ai_last_threat_signature = None
+        self.shield_timer = 0.0
+        self.magnet_timer = 0.0
+        self.slowmo_timer = 0.0
 
         self.obstacle_timer = 0.8
         self.coin_timer = 0.9
+        self.powerup_timer = 4.2
         self.trail_timer = 0.0
         self.shake_timer = 0.0
         self.shake_strength = 0.0
@@ -193,6 +209,7 @@ class Game(object):
         self.player.reset()
         self.obstacles = []
         self.coins = []
+        self.powerups = []
         self.particles.clear()
         self.score = 0
         self.coin_score = 0
@@ -203,8 +220,21 @@ class Game(object):
         self.speed_multiplier = 1.0
         self.combo = 1
         self.combo_timer = 0.0
+        self.best_combo = 1
+        self.max_speed_multiplier = 1.0
+        self.difficulty_label = "Easy"
+        self.difficulty_reached = "Easy"
+        self.ai_slide_timer = 0.0
+        self.ai_jump_cooldown = 0.0
+        self.ai_cached_plan = []
+        self.ai_plan_timer = 0.0
+        self.ai_last_threat_signature = None
+        self.shield_timer = 0.0
+        self.magnet_timer = 0.0
+        self.slowmo_timer = 0.0
         self.obstacle_timer = 0.95
         self.coin_timer = 0.55
+        self.powerup_timer = 4.2
         self.trail_timer = 0.0
         self.shake_timer = 0.0
         self.shake_strength = 0.0
@@ -262,6 +292,13 @@ class Game(object):
 
         if key == pygame.K_m:
             self._toggle_mute()
+            return
+
+        if key == pygame.K_a:
+            self.ai_enabled = not self.ai_enabled
+            self.ai_cached_plan = []
+            self.ai_plan_timer = 0.0
+            self.ai_last_threat_signature = None
             return
 
         if self.state == STATE_MENU:
@@ -330,11 +367,18 @@ class Game(object):
         if self.state != STATE_PLAYING:
             return
 
+        self._update_powerup_timers(dt)
         self._update_difficulty()
-        self._update_background(dt, self.speed)
+        active_speed = self.speed
+        if self.slowmo_timer > 0.0:
+            active_speed *= settings.SLOWMO_FACTOR
+        self._update_background(dt, active_speed)
 
         keys = pygame.key.get_pressed()
         slide_held = keys[pygame.K_DOWN] or keys[pygame.K_s]
+        if self.ai_enabled:
+            self._update_ai_runner(dt, active_speed)
+            slide_held = self.ai_slide_timer > 0.0
         self.player.update(dt, slide_held)
 
         if self.player.just_landed():
@@ -346,12 +390,13 @@ class Game(object):
 
         self._update_trail(dt)
         self._update_spawning(dt)
-        self._update_obstacles(dt)
-        self._update_coins(dt)
+        self._update_obstacles(dt, active_speed)
+        self._update_coins(dt, active_speed)
+        self._update_powerups(dt, active_speed)
         self.particles.update(dt)
 
-        self.distance += self.speed * dt
-        self.distance_score += self.speed * dt * settings.DISTANCE_SCORE_RATE
+        self.distance += active_speed * dt
+        self.distance_score += active_speed * dt * settings.DISTANCE_SCORE_RATE
         if self.combo_timer > 0.0:
             self.combo_timer -= dt
         else:
@@ -362,9 +407,32 @@ class Game(object):
             self.shake_timer -= dt
 
     def _update_difficulty(self):
+        # Rule-based difficulty scaling: distance increases speed and unlocks harder labels.
         self.speed_multiplier = 1.0 + self.distance * settings.SPEED_SCALE_PER_DISTANCE
         base_speed = settings.WORLD_SCROLL_SPEED * self.speed_multiplier
         self.speed = min(settings.MAX_SCROLL_SPEED, base_speed)
+        self.max_speed_multiplier = max(self.max_speed_multiplier, self.speed / settings.WORLD_SCROLL_SPEED)
+        self.difficulty_label = self._difficulty_for_distance(self.distance)
+        order = ["Easy", "Medium", "Hard", "Extreme"]
+        if order.index(self.difficulty_label) > order.index(self.difficulty_reached):
+            self.difficulty_reached = self.difficulty_label
+
+    def _difficulty_for_distance(self, distance):
+        if distance >= settings.EXPERT_MODE_DISTANCE:
+            return "Extreme"
+        if distance >= settings.HARD_MODE_DISTANCE:
+            return "Hard"
+        if distance >= 420:
+            return "Medium"
+        return "Easy"
+
+    def _update_powerup_timers(self, dt):
+        self.shield_timer = max(0.0, self.shield_timer - dt)
+        self.magnet_timer = max(0.0, self.magnet_timer - dt)
+        self.slowmo_timer = max(0.0, self.slowmo_timer - dt)
+        self.ai_slide_timer = max(0.0, self.ai_slide_timer - dt)
+        self.ai_jump_cooldown = max(0.0, self.ai_jump_cooldown - dt)
+        self.ai_plan_timer = max(0.0, self.ai_plan_timer - dt)
 
     def _update_background(self, dt, speed):
         for layer in self.background_layers:
@@ -385,9 +453,269 @@ class Game(object):
                 0.24
             )
 
+    def _update_ai_runner(self, dt, active_speed):
+        obstacles = self._get_ai_relevant_obstacles(active_speed)
+        emergency_action = self._ai_emergency_action(obstacles, active_speed, urgent_only=True)
+        if emergency_action:
+            self.ai_cached_plan = []
+            self.ai_plan_timer = 0.0
+            action = emergency_action
+        else:
+            action = self._plan_ai_action_astar(obstacles, active_speed)
+
+        if action == "slide":
+            self.ai_slide_timer = max(self.ai_slide_timer, 0.42)
+        elif action == "jump" and self.ai_jump_cooldown <= 0.0:
+            self.player.queue_jump()
+            self.ai_jump_cooldown = 0.32
+            self.sound.play("jump")
+            self.particles.emit(
+                self.player.rect.left, self.player.rect.bottom, 8,
+                settings.NEON_CYAN, math.pi, 50, 180, 0.35
+            )
+
+    def _get_ai_relevant_obstacles(self, active_speed):
+        relevant_obstacles = []
+        lookahead_distance = active_speed * settings.AI_PLAN_HORIZON + 260
+        for obstacle in self.obstacles:
+            distance = obstacle.rect.left - self.player.rect.right
+            if -100 <= distance <= lookahead_distance:
+                relevant_obstacles.append(obstacle)
+        return relevant_obstacles
+
+    def _plan_ai_action_astar(self, relevant_obstacles, active_speed):
+        """Use A* search to choose the first safe action in a short future window."""
+        if not relevant_obstacles:
+            self.ai_cached_plan = []
+            self.ai_last_threat_signature = None
+            return "run"
+
+        threat_signature = self._ai_threat_signature(relevant_obstacles)
+        if (
+            self.ai_cached_plan and
+            self.ai_plan_timer > 0.0 and
+            threat_signature == self.ai_last_threat_signature
+        ):
+            return self.ai_cached_plan[0]
+
+        step_time = settings.AI_PLAN_STEP
+        max_steps = int(settings.AI_PLAN_HORIZON / step_time)
+        start_y = float(self.player.y)
+        start_vy = float(self.player.vel_y)
+        start_jumps = int(self.player.jump_count)
+        start_slide = int(math.ceil(self.ai_slide_timer / step_time))
+        start_state = (0, int(start_y), int(start_vy), start_jumps, start_slide)
+
+        queue = []
+        counter = 0
+        heapq.heappush(queue, (0.0, counter, start_state, []))
+        best_cost = {start_state: 0.0}
+        expanded = 0
+        best_path = []
+        best_step = 0
+
+        while queue and expanded < settings.AI_MAX_SEARCH_NODES:
+            _, _, state, path = heapq.heappop(queue)
+            expanded += 1
+            step, y, vy, jumps, slide_ticks = state
+
+            if step > best_step:
+                best_step = step
+                best_path = path
+            if step >= max_steps:
+                self._cache_ai_plan(path, threat_signature)
+                return path[0] if path else "run"
+
+            for action in ("run", "jump", "slide"):
+                next_state = self._simulate_ai_state(
+                    state, action, step_time, relevant_obstacles, active_speed
+                )
+                if next_state is None:
+                    continue
+
+                new_path = path + [action]
+                action_cost = self._ai_action_cost(
+                    action, next_state, relevant_obstacles, active_speed, step_time
+                )
+                new_cost = best_cost[state] + action_cost
+
+                if next_state in best_cost and best_cost[next_state] <= new_cost:
+                    continue
+
+                best_cost[next_state] = new_cost
+                counter += 1
+                priority = new_cost + self._ai_heuristic(
+                    next_state, max_steps, relevant_obstacles, active_speed, step_time
+                )
+                heapq.heappush(queue, (priority, counter, next_state, new_path))
+
+        if best_path:
+            self._cache_ai_plan(best_path, threat_signature)
+            return best_path[0]
+        return self._ai_emergency_action(relevant_obstacles, active_speed, urgent_only=False)
+
+    def _cache_ai_plan(self, path, threat_signature):
+        self.ai_cached_plan = path[:3]
+        self.ai_plan_timer = settings.AI_REPLAN_INTERVAL
+        self.ai_last_threat_signature = threat_signature
+
+    def _ai_threat_signature(self, obstacles):
+        nearest = obstacles[0]
+        nearest_distance = nearest.rect.left - self.player.rect.right
+        for obstacle in obstacles:
+            distance = obstacle.rect.left - self.player.rect.right
+            if distance < nearest_distance:
+                nearest = obstacle
+                nearest_distance = distance
+        return (nearest.kind, int(nearest_distance / 20), len(obstacles))
+
+    def _simulate_ai_state(self, state, action, dt, obstacles, active_speed):
+        step, y, vy, jumps, slide_ticks = state
+        y = float(y)
+        vy = float(vy)
+        on_ground = y + settings.PLAYER_HEIGHT >= settings.GROUND_Y - 1
+
+        if action == "jump":
+            if on_ground:
+                vy = settings.JUMP_FORCE
+                jumps = 1
+                slide_ticks = 0
+            elif jumps < 2:
+                vy = settings.DOUBLE_JUMP_FORCE
+                jumps = 2
+                slide_ticks = 0
+            else:
+                return None
+        elif action == "slide":
+            if on_ground:
+                slide_ticks = max(slide_ticks, int(math.ceil(settings.SLIDE_DURATION / dt)))
+                y = settings.GROUND_Y - settings.PLAYER_SLIDE_HEIGHT
+            else:
+                return None
+
+        vy += settings.GRAVITY * dt
+        if vy > settings.MAX_FALL_SPEED:
+            vy = settings.MAX_FALL_SPEED
+        y += vy * dt
+
+        height = settings.PLAYER_SLIDE_HEIGHT if slide_ticks > 0 else settings.PLAYER_HEIGHT
+        width = settings.PLAYER_SLIDE_WIDTH if slide_ticks > 0 else settings.PLAYER_WIDTH
+
+        if y + height >= settings.GROUND_Y:
+            y = settings.GROUND_Y - height
+            vy = 0.0
+            jumps = 0
+            on_ground = True
+        else:
+            on_ground = False
+
+        if slide_ticks > 0:
+            slide_ticks -= 1
+
+        player_rect = pygame.Rect(
+            settings.PLAYER_START_X,
+            int(y),
+            width,
+            height
+        ).inflate(
+            settings.AI_COLLISION_MARGIN - 8,
+            settings.AI_COLLISION_MARGIN - 8
+        )
+
+        future_time = (step + 1) * dt
+        for obstacle in obstacles:
+            future_rect = obstacle.rect.copy()
+            future_rect.x = int(obstacle.rect.x - active_speed * future_time)
+            future_rect = future_rect.inflate(settings.AI_COLLISION_MARGIN, settings.AI_COLLISION_MARGIN)
+            if player_rect.colliderect(future_rect):
+                return None
+
+        y_bucket = int(round(y / 8.0) * 8)
+        vy_bucket = int(round(vy / 60.0) * 60)
+        if on_ground:
+            y_bucket = settings.GROUND_Y - height
+        return (step + 1, y_bucket, vy_bucket, jumps, slide_ticks)
+
+    def _ai_action_cost(self, action, state, obstacles, active_speed, dt):
+        step, y, vy, jumps, slide_ticks = state
+        cost = 0.25
+        if action == "jump":
+            cost = 1.15
+        elif action == "slide":
+            cost = 0.95
+
+        nearest = self._ai_nearest_future_obstacle(obstacles, active_speed, step * dt)
+        if nearest:
+            obstacle, distance = nearest
+            if distance < settings.AI_EMERGENCY_DISTANCE * 1.6 and action == "run":
+                cost += 2.2
+            if obstacle.kind == "drone" and action == "jump":
+                cost += 2.0
+            if obstacle.kind != "drone" and action == "slide":
+                cost += 1.0
+            if obstacle.kind != "drone" and action == "jump" and distance < 180:
+                cost -= 0.35
+            if obstacle.kind == "drone" and action == "slide" and distance < 190:
+                cost -= 0.35
+        return max(0.05, cost)
+
+    def _ai_heuristic(self, state, max_steps, obstacles, active_speed, dt):
+        step, y, vy, jumps, slide_ticks = state
+        remaining_steps = max_steps - step
+        height_penalty = 0.0
+        if y < settings.GROUND_Y - settings.PLAYER_HEIGHT - 120:
+            height_penalty = 0.35
+        safety_bonus = 0.0
+        nearest = self._ai_nearest_future_obstacle(obstacles, active_speed, step * dt)
+        if nearest:
+            obstacle, distance = nearest
+            if distance < 170:
+                safety_bonus = (170 - distance) / 70.0
+            if obstacle.kind == "drone" and slide_ticks <= 0 and distance < 190:
+                safety_bonus += 0.9
+            if obstacle.kind != "drone" and y > settings.GROUND_Y - settings.PLAYER_HEIGHT - 18 and distance < 190:
+                safety_bonus += 0.9
+        return remaining_steps * 0.04 + height_penalty + safety_bonus
+
+    def _ai_nearest_future_obstacle(self, obstacles, active_speed, future_time):
+        nearest = None
+        nearest_distance = 9999
+        for obstacle in obstacles:
+            future_left = obstacle.rect.left - active_speed * future_time
+            distance = future_left - self.player.rect.right
+            if 0 <= distance < nearest_distance:
+                nearest = obstacle
+                nearest_distance = distance
+        if nearest is None:
+            return None
+        return nearest, nearest_distance
+
+    def _ai_emergency_action(self, obstacles, active_speed, urgent_only):
+        nearest = None
+        nearest_distance = 9999
+        for obstacle in obstacles:
+            distance = obstacle.rect.left - self.player.rect.right
+            if 0 <= distance < nearest_distance:
+                nearest = obstacle
+                nearest_distance = distance
+
+        if nearest is None:
+            return None if urgent_only else "run"
+
+        emergency_distance = settings.AI_EMERGENCY_DISTANCE + active_speed * 0.08
+        if urgent_only and nearest_distance > emergency_distance:
+            return None
+
+        if nearest and nearest.kind == "drone":
+            return "slide"
+        if self.player.on_ground or self.player.jump_count < 2:
+            return "jump"
+        return "run"
+
     def _update_spawning(self, dt):
         self.obstacle_timer -= dt
         self.coin_timer -= dt
+        self.powerup_timer -= dt
 
         if self.obstacle_timer <= 0.0:
             self.spawn_obstacle_group()
@@ -396,6 +724,10 @@ class Game(object):
         if self.coin_timer <= 0.0:
             self.spawn_coin_pattern()
             self.coin_timer = self._next_coin_interval()
+
+        if self.powerup_timer <= 0.0:
+            self.spawn_powerup()
+            self.powerup_timer = self._next_powerup_interval()
 
     def _next_obstacle_interval(self):
         pressure = min(0.65, self.distance / 4200.0)
@@ -409,12 +741,19 @@ class Game(object):
         interval = max(settings.COIN_MIN_INTERVAL, interval)
         return random.uniform(interval * 0.8, interval * 1.25)
 
+    def _next_powerup_interval(self):
+        pressure = min(2.0, self.distance / 3500.0)
+        interval = settings.POWERUP_BASE_INTERVAL - pressure
+        interval = max(settings.POWERUP_MIN_INTERVAL, interval)
+        return random.uniform(interval * 0.85, interval * 1.25)
+
     def spawn_obstacle_group(self):
         if self.obstacles:
             rightmost = max(obstacle.rect.right for obstacle in self.obstacles)
             if settings.OBSTACLE_SPAWN_X - rightmost < settings.MIN_OBSTACLE_GAP:
                 return
 
+        # Fairness rule: new obstacle types unlock gradually instead of all at once.
         kinds = ["spike", "rock"]
         if self.distance > 420:
             kinds.append("wall")
@@ -456,36 +795,89 @@ class Game(object):
                     base_y + random.randint(-55, 40)
                 ))
 
-    def _update_obstacles(self, dt):
+    def spawn_powerup(self):
+        kind = random.choice(["shield", "magnet", "slowmo"])
+        y = random.choice([245, 285, 325])
+        self.powerups.append(PowerUp(kind, settings.POWERUP_SPAWN_X, y))
+
+    def _update_obstacles(self, dt, speed):
         alive = []
         player_hitbox = self.player.rect.inflate(-8, -8)
         for obstacle in self.obstacles:
-            obstacle.update(dt, self.speed)
+            obstacle.update(dt, speed)
+            if player_hitbox.colliderect(obstacle.rect):
+                if self.shield_timer > 0.0:
+                    self._use_shield(obstacle)
+                    continue
+                else:
+                    self._trigger_game_over()
+                    return
             if not obstacle.is_offscreen():
                 alive.append(obstacle)
-            if player_hitbox.colliderect(obstacle.rect):
-                self._trigger_game_over()
-                return
         self.obstacles = alive
 
-    def _update_coins(self, dt):
+    def _update_coins(self, dt, speed):
         alive = []
         for coin in self.coins:
-            coin.update(dt, self.speed)
+            coin.update(dt, speed)
+            if self.magnet_timer > 0.0:
+                self._pull_coin_toward_player(coin, dt)
             if coin.rect.colliderect(self.player.rect):
                 self._collect_coin(coin)
             elif not coin.is_offscreen():
                 alive.append(coin)
         self.coins = alive
 
+    def _update_powerups(self, dt, speed):
+        alive = []
+        for powerup in self.powerups:
+            powerup.update(dt, speed)
+            if powerup.rect.colliderect(self.player.rect):
+                self._collect_powerup(powerup)
+            elif not powerup.is_offscreen():
+                alive.append(powerup)
+        self.powerups = alive
+
+    def _pull_coin_toward_player(self, coin, dt):
+        dx = self.player.rect.centerx - coin.x
+        dy = self.player.rect.centery - coin.y
+        distance = math.hypot(dx, dy)
+        if 1.0 < distance < settings.MAGNET_RADIUS:
+            pull_speed = 420.0
+            coin.x += (dx / distance) * pull_speed * dt
+            coin.y += (dy / distance) * pull_speed * dt
+            coin.rect.x = int(coin.x - coin.radius)
+            coin.rect.y = int(coin.y - coin.radius)
+
     def _collect_coin(self, coin):
         coin.collected = True
         self.coins_collected += 1
         self.combo_timer = settings.COMBO_TIMEOUT
         self.combo = min(settings.MAX_COMBO_MULTIPLIER, self.combo + 1)
+        self.best_combo = max(self.best_combo, self.combo)
         self.coin_score += settings.COIN_SCORE_VALUE * self.combo
         self.sound.play("coin")
         self.particles.emit_burst(coin.x, coin.y, 13, settings.NEON_AMBER)
+
+    def _collect_powerup(self, powerup):
+        if powerup.kind == "shield":
+            self.shield_timer = settings.SHIELD_DURATION
+            color = settings.NEON_CYAN
+        elif powerup.kind == "magnet":
+            self.magnet_timer = settings.MAGNET_DURATION
+            color = settings.NEON_MAGENTA
+        else:
+            self.slowmo_timer = settings.SLOWMO_DURATION
+            color = settings.NEON_LIME
+        self.coin_score += settings.POWERUP_SCORE_VALUE
+        self.sound.play("coin")
+        self.particles.emit_burst(powerup.rect.centerx, powerup.rect.centery, 20, color)
+
+    def _use_shield(self, obstacle):
+        self.shield_timer = 0.0
+        self.sound.play("hit")
+        self.start_shake(settings.SHAKE_LANDING_DURATION, settings.SHAKE_COLLISION_STRENGTH)
+        self.particles.emit_burst(obstacle.rect.centerx, obstacle.rect.centery, 28, settings.NEON_CYAN)
 
     def _trigger_game_over(self):
         if self.state != STATE_PLAYING:
@@ -554,6 +946,8 @@ class Game(object):
     def _draw_world(self, offset):
         for coin in self.coins:
             coin.draw(self.screen, offset)
+        for powerup in self.powerups:
+            powerup.draw(self.screen, offset)
         for obstacle in self.obstacles:
             obstacle.draw(self.screen, offset)
         self.player.draw(self.screen, offset)
@@ -568,16 +962,31 @@ class Game(object):
         coin_text = "Coins  {0}".format(self.coins_collected)
         dist_text = "Distance  {0}m".format(int(self.distance / 10))
         high_text = "Best  {0}".format(self.highscore)
+        diff_text = self.difficulty_label
         speed_text = "x{0:.2f}".format(self.speed / settings.WORLD_SCROLL_SPEED)
 
         self._draw_text(score_text, self.font_medium, settings.SOFT_WHITE, (34, 28))
         self._draw_text(coin_text, self.font_small, settings.NEON_AMBER, (220, 31))
         self._draw_text(dist_text, self.font_small, settings.NEON_CYAN, (354, 31))
-        self._draw_text(high_text, self.font_small, settings.MUTED_TEXT, (540, 31))
+        self._draw_text(high_text, self.font_small, settings.MUTED_TEXT, (522, 31))
+        self._draw_text(diff_text, self.font_small, settings.NEON_MAGENTA, (650, 31))
         self._draw_text(speed_text, self.font_medium, settings.NEON_LIME, (850, 27))
 
         if self.combo > 1 and self.combo_timer > 0.0:
             self._draw_text("Combo x{0}".format(self.combo), self.font_small, settings.NEON_MAGENTA, (34, 78))
+
+        if self.ai_enabled:
+            self._draw_text("A* AI", self.font_small, settings.NEON_LIME, (144, 78))
+
+        powerup_x = 270
+        if self.shield_timer > 0.0:
+            self._draw_text("Shield {0:.0f}s".format(self.shield_timer), self.font_small, settings.NEON_CYAN, (powerup_x, 78))
+            powerup_x += 118
+        if self.magnet_timer > 0.0:
+            self._draw_text("Magnet {0:.0f}s".format(self.magnet_timer), self.font_small, settings.NEON_MAGENTA, (powerup_x, 78))
+            powerup_x += 118
+        if self.slowmo_timer > 0.0:
+            self._draw_text("Slow {0:.0f}s".format(self.slowmo_timer), self.font_small, settings.NEON_LIME, (powerup_x, 78))
 
         mute_text = "MUTE" if self.sound.muted else "SOUND"
         self.buttons["mute"] = pygame.Rect(742, 26, 78, 25)
@@ -598,7 +1007,7 @@ class Game(object):
         )
 
         self.buttons["start"] = self._draw_button("START RUN", 292, settings.NEON_CYAN)
-        self._draw_centered_text("Space / Up: Jump    Down / S: Slide    P: Pause    M: Mute", self.font_small, settings.SOFT_WHITE, 366)
+        self._draw_centered_text("Space / Up: Jump    Down / S: Slide    A: A* AI Runner    P: Pause    M: Mute", self.font_small, settings.SOFT_WHITE, 366)
         self._draw_centered_text("High Score: {0}".format(self.highscore), self.font_medium, settings.NEON_AMBER, 410)
 
     def _draw_pause(self):
@@ -608,11 +1017,17 @@ class Game(object):
 
     def _draw_game_over(self):
         self._draw_dim_overlay(165)
-        self._draw_centered_text("RUN ENDED", self.font_title, settings.HOT_RED, 122)
-        self._draw_centered_text("Score: {0}".format(self.score), self.font_large, settings.SOFT_WHITE, 202)
-        self._draw_centered_text("Coins: {0}    Distance: {1}m".format(self.coins_collected, int(self.distance / 10)), self.font_medium, settings.NEON_CYAN, 250)
-        self._draw_centered_text("Best: {0}".format(self.highscore), self.font_medium, settings.NEON_AMBER, 292)
-        self.buttons["restart"] = self._draw_button("RESTART", 350, settings.NEON_MAGENTA)
+        self._draw_centered_text("RUN ENDED", self.font_title, settings.HOT_RED, 95)
+        self._draw_centered_text("Score: {0}".format(self.score), self.font_large, settings.SOFT_WHITE, 166)
+        self._draw_centered_text("Coins: {0}    Distance: {1}m".format(self.coins_collected, int(self.distance / 10)), self.font_medium, settings.NEON_CYAN, 214)
+        self._draw_centered_text("Best: {0}    Best Combo: x{1}".format(self.highscore, self.best_combo), self.font_medium, settings.NEON_AMBER, 254)
+        self._draw_centered_text(
+            "Max Speed: x{0:.2f}    Difficulty: {1}".format(self.max_speed_multiplier, self.difficulty_reached),
+            self.font_small, settings.SOFT_WHITE, 294
+        )
+        mode_text = "Mode: A* AI Demo" if self.ai_enabled else "Mode: Manual"
+        self._draw_centered_text(mode_text, self.font_small, settings.MUTED_TEXT, 324)
+        self.buttons["restart"] = self._draw_button("RESTART", 374, settings.NEON_MAGENTA)
 
     def _draw_dim_overlay(self, alpha):
         overlay = pygame.Surface((settings.SCREEN_WIDTH, settings.SCREEN_HEIGHT), pygame.SRCALPHA)

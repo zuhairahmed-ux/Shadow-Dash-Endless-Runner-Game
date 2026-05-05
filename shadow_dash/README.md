@@ -9,11 +9,15 @@ The project is intentionally small and beginner-friendly for an AI Lab final sub
 - Smooth endless runner gameplay at 60 FPS
 - Fullscreen presentation with scaled 960x540 gameplay
 - Jump, double jump, and slide mechanics
+- Toggleable A* AI demo runner with short-horizon action planning
+- Improved AI safety with plan caching, collision margins, and emergency fallback
 - State-based player animation: run, jump, double jump, slide, hurt, and death
 - Four obstacle types: spike, rock, wall, and enemy drone
 - Procedural obstacle generation with fair spacing
 - Animated coins with line, arc, wave, and cluster spawn patterns
 - Rule-based AI difficulty scaling that increases speed and challenge over time
+- Visible difficulty labels: Easy, Medium, Hard, and Extreme
+- Power-ups: shield, coin magnet, and slow motion
 - Four-layer parallax cyberpunk background drawn with Pygame primitives
 - Lightweight particles for jump dust, coin sparkle, speed trails, and collision bursts
 - Subtle camera shake on landing and collision
@@ -42,6 +46,7 @@ python main.py
 
 - `Space`, `Up`, or `W`: Jump / double jump
 - `Down` or `S`: Slide
+- `A`: Toggle A* AI Runner demo mode
 - `P`: Pause or resume
 - `M`: Mute or unmute sound
 - `Enter` or `Space`: Start / restart
@@ -50,9 +55,12 @@ python main.py
 ## AI Concepts Used
 
 - **Rule-based difficulty scaling:** The game watches survival distance and gradually increases speed, spawn frequency, and obstacle combinations.
+- **A* AI demo runner:** The AI searches a short future window using possible actions such as run, jump, double jump, and slide. It rejects paths that collide with obstacles, uses action costs and a survival heuristic, and executes the first action from the safest plan.
+- **Real-time AI improvements:** The planner uses a longer horizon, smaller simulation steps, cached plans for a few frames, inflated collision margins for safety, obstacle-aware costs, and an emergency fallback when a threat is too close.
 - **Procedural generation:** Obstacles and coin patterns are generated dynamically so each run feels different.
 - **Fairness rules:** Obstacle groups use minimum spacing and staged unlocks so the early game is easy and late-game pressure rises without creating impossible situations.
 - **State machines:** Player animation and game flow are controlled by clear states such as menu, playing, paused, game over, run, jump, slide, hurt, and death.
+- **Power-up timers:** Temporary ability states are managed with countdown timers for shield, magnet, and slow motion effects.
 
 ## File Structure
 
